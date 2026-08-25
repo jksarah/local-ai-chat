@@ -15,8 +15,8 @@ def home():
 @app.route("/api/chat", methods=["POST"])
 def chat():
     data = request.get_json()
-    messages = data.get("messages", [])
-    model = data.get("model", "llama3")
+    messages = data.get("messages", []) 
+    model = data.get("model", "llama3:latest")
     print("Selected model:", model)
 
     def generate():
