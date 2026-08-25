@@ -47,7 +47,8 @@ Use clean Markdown formatting.
             json={
                 "model": model,
                 "messages": messages,
-                "stream": True
+                "stream": True,
+                "keep_alive": "30m"
             },
             stream=True
         ) as response:
