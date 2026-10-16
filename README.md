@@ -5,6 +5,7 @@ A small Flask web app that provides a chat interface (LocalMind) for local LLMs 
 ## Features
 
 - Fully offline: Markdown libraries are bundled in `static/vendor/` (no CDN)
+- Syntax-highlighted code blocks with a Copy button
 - Browser chat UI (`templates/index.html`) with Markdown rendering (sanitized with DOMPurify)
 - Streams responses token-by-token from Ollama, with a Stop button
 - Model dropdown is filled from the models installed in Ollama; your choice is remembered
@@ -48,7 +49,7 @@ Returns a streamed `text/plain` response containing the generated text. Invalid 
 ```
 app.py                Flask server; proxies chat requests to Ollama
 templates/index.html  Chat frontend
-static/vendor/        Bundled marked + DOMPurify (offline)
+static/vendor/        Bundled marked, DOMPurify, highlight.js (offline)
 requirements.txt      Python dependencies
 ```
 

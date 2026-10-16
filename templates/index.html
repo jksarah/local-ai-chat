@@ -8,6 +8,8 @@
 
   <script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
   <script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='vendor/highlight.min.js') }}"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/github-dark.min.css') }}">
 
   <style>
     * {
@@ -734,6 +736,11 @@
       position: relative;
     }
 
+    .ai-content pre code.hljs {
+      background: transparent;
+      padding: 0;
+    }
+
     .copy-code {
       position: absolute;
       top: 8px;
@@ -1016,6 +1023,12 @@ function renderMarkdown(text) {
   tpl.content
     .querySelectorAll("pre")
     .forEach(pre => {
+      const codeEl = pre.querySelector("code");
+
+      if (codeEl && window.hljs) {
+        hljs.highlightElement(codeEl);
+      }
+
       const btn =
         document.createElement("button");
 
