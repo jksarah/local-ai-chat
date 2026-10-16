@@ -5,6 +5,7 @@ A small Flask web app that provides a chat interface (LocalMind) for local LLMs 
 ## Features
 
 - Fully offline: Markdown libraries are bundled in `static/vendor/` (no CDN)
+- Attach images (vision models only, e.g. `llava`, `llama3.2-vision`, `qwen2.5vl`), PDFs and text files via the + button, drag & drop or paste; PDF text is extracted locally
 - Syntax-highlighted code blocks with a Copy button
 - Browser chat UI (`templates/index.html`) with Markdown rendering (sanitized with DOMPurify)
 - Streams responses token-by-token from Ollama, with a Stop button
@@ -44,6 +45,8 @@ Then open http://127.0.0.1:5000.
 
 Returns a streamed `text/plain` response containing the generated text. Invalid input returns `400`; Ollama failures return `502` with `{ "error": "..." }`.
 
+`POST /api/extract` – multipart upload (`file`) of a PDF or text file; returns `{ "name", "text", "truncated" }`. Messages in `/api/chat` may also include `"images"` (base64 data URLs) and `"files"` (`[{ "name", "text" }]`).
+
 ## Project Structure
 
 ```
@@ -61,6 +64,8 @@ requirements.txt      Python dependencies
 | `DEFAULT_MODEL`   | `llama3:latest`           | Model used when none is given  |
 | `KEEP_ALIVE`      | `30m`                     | How long Ollama keeps it loaded|
 | `HOST` / `PORT`   | `127.0.0.1` / `5000`      | Server bind address            |
+| `NUM_CTX`         | `8192`                    | Context window (tokens)        |
+| `MAX_FILE_CHARS`  | `20000`                   | Max text kept per attached file|
 | `FLASK_DEBUG`     | unset                     | Set to `1` to enable debug mode|
 
 The system prompt is the `SYSTEM_MESSAGE` constant in `app.py`.

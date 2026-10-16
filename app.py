@@ -1,5 +1,6 @@
 import json
 import logging
+import io
 import os
 
 import requests
@@ -7,6 +8,7 @@ from flask import Flask, Response, jsonify, render_template, request
 from flask_cors import CORS
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024  # max request size (uploads/images)
 CORS(app)
 
 logging.basicConfig(level=logging.INFO)
@@ -19,6 +21,11 @@ DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "llama3:latest")
 KEEP_ALIVE = os.environ.get("KEEP_ALIVE", "30m")
 # (connect timeout, read timeout between chunks) in seconds
 REQUEST_TIMEOUT = (5, 300)
+# Context window; larger so attached documents are not silently cut off by Ollama
+NUM_CTX = int(os.environ.get("NUM_CTX", "8192"))
+# Max characters of extracted text kept per attached file
+MAX_FILE_CHARS = int(os.environ.get("MAX_FILE_CHARS", "20000"))
+MAX_PDF_PAGES = 100
 
 SYSTEM_MESSAGE = {
     "role": "system",
@@ -61,6 +68,74 @@ def models():
     return jsonify(models=names, default=DEFAULT_MODEL)
 
 
+def _clip(text):
+    if len(text) > MAX_FILE_CHARS:
+        return text[:MAX_FILE_CHARS] + "\n[...truncated...]", True
+    return text, False
+
+
+@app.route("/api/extract", methods=["POST"])
+def extract():
+    """Extract text from an uploaded PDF or plain-text file."""
+    f = request.files.get("file")
+    if f is None or not f.filename:
+        return jsonify(error="No file uploaded"), 400
+    name = os.path.basename(f.filename)
+    data = f.read()
+    if name.lower().endswith(".pdf"):
+        try:
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(data))
+            parts = []
+            for page in reader.pages[:MAX_PDF_PAGES]:
+                parts.append(page.extract_text() or "")
+            text = "\n\n".join(parts).strip()
+        except Exception as e:  # corrupt/encrypted PDFs raise many error types
+            log.warning("PDF extract failed: %s", e)
+            return jsonify(error="Could not read this PDF (corrupt or encrypted?)"), 422
+        if not text:
+            return jsonify(error="No text found in this PDF (scanned PDFs are not supported)"), 422
+    else:
+        try:
+            text = data.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            return jsonify(error="Unsupported file type"), 415
+    text, truncated = _clip(text)
+    return jsonify(name=name, text=text, truncated=truncated)
+
+
+def _to_ollama_message(m):
+    """Convert a UI message (text + optional files/images) to an Ollama message."""
+    content = m["content"]
+    files = m.get("files") or []
+    if files:
+        docs = "".join(
+            f"[Attached file: {f['name']}]\n{f['text']}\n[End of file]\n\n" for f in files
+        )
+        content = docs + content
+    out = {"role": m["role"], "content": content}
+    images = m.get("images") or []
+    if images:
+        # strip "data:image/...;base64," prefix
+        out["images"] = [i.split(",", 1)[-1] for i in images]
+    return out
+
+
+def _valid_attachments(m):
+    files, images = m.get("files"), m.get("images")
+    if files is not None:
+        if not isinstance(files, list) or not all(
+            isinstance(f, dict) and isinstance(f.get("name"), str) and isinstance(f.get("text"), str)
+            for f in files
+        ):
+            return False
+    if images is not None:
+        if not isinstance(images, list) or not all(isinstance(i, str) for i in images):
+            return False
+    return True
+
+
 @app.route("/api/chat", methods=["POST"])
 def chat():
     data = request.get_json(silent=True)
@@ -79,11 +154,14 @@ def chat():
             or not isinstance(m.get("content"), str)
         ):
             return jsonify(error="Each message needs a valid 'role' and string 'content'"), 400
+        if not _valid_attachments(m):
+            return jsonify(error="Invalid 'files' or 'images' in message"), 400
 
     log.info("Chat request: model=%s, messages=%d", model, len(messages))
     payload = {
         "model": model,
-        "messages": [SYSTEM_MESSAGE] + messages,
+        "messages": [SYSTEM_MESSAGE] + [_to_ollama_message(m) for m in messages],
+        "options": {"num_ctx": NUM_CTX},
         "stream": True,
         "keep_alive": KEEP_ALIVE,
     }
