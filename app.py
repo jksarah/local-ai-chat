@@ -1,27 +1,28 @@
-from flask import Flask, request, Response, render_template
-from flask_cors import CORS
-import requests
 import json
+import logging
+import os
+
+import requests
+from flask import Flask, Response, jsonify, render_template, request
+from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-OLLAMA_API_URL = "http://localhost:11434/api/chat"
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("localmind")
 
-@app.route("/")
-def home():
-    return render_template("index.html")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
+OLLAMA_TAGS_URL = f"{OLLAMA_BASE_URL}/api/tags"
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "llama3:latest")
+KEEP_ALIVE = os.environ.get("KEEP_ALIVE", "30m")
+# (connect timeout, read timeout between chunks) in seconds
+REQUEST_TIMEOUT = (5, 300)
 
-@app.route("/api/chat", methods=["POST"])
-def chat():
-    data = request.get_json()
-    messages = data.get("messages", []) 
-    model = data.get("model", "llama3:latest")
-    print("Selected model:", model)
-
-    system_message = {
-        "role": "system",
-        "content": """
+SYSTEM_MESSAGE = {
+    "role": "system",
+    "content": """
 You are LocalMind, a helpful local AI assistant.
 
 Answer questions directly and clearly.
@@ -36,32 +37,99 @@ For technical questions:
 - If you are unsure, say so instead of inventing information.
 
 Use clean Markdown formatting.
-"""
+""",
+}
+
+VALID_ROLES = {"user", "assistant"}
+
+
+@app.route("/")
+def home():
+    return render_template("index.html")
+
+
+@app.route("/api/models")
+def models():
+    """List models installed in Ollama."""
+    try:
+        r = requests.get(OLLAMA_TAGS_URL, timeout=5)
+        r.raise_for_status()
+        names = [m["name"] for m in r.json().get("models", [])]
+    except requests.RequestException as e:
+        log.warning("Could not list models: %s", e)
+        return jsonify(error="Cannot reach Ollama", models=[], default=DEFAULT_MODEL), 503
+    return jsonify(models=names, default=DEFAULT_MODEL)
+
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(error="Request body must be JSON"), 400
+
+    messages = data.get("messages", [])
+    model = data.get("model") or DEFAULT_MODEL
+
+    if not isinstance(messages, list) or not messages:
+        return jsonify(error="'messages' must be a non-empty list"), 400
+    for m in messages:
+        if (
+            not isinstance(m, dict)
+            or m.get("role") not in VALID_ROLES
+            or not isinstance(m.get("content"), str)
+        ):
+            return jsonify(error="Each message needs a valid 'role' and string 'content'"), 400
+
+    log.info("Chat request: model=%s, messages=%d", model, len(messages))
+    payload = {
+        "model": model,
+        "messages": [SYSTEM_MESSAGE] + messages,
+        "stream": True,
+        "keep_alive": KEEP_ALIVE,
     }
 
-    messages = [system_message] + messages
- 
+    # Open the upstream connection before streaming so failures become real HTTP errors.
+    try:
+        upstream = requests.post(
+            OLLAMA_CHAT_URL, json=payload, stream=True, timeout=REQUEST_TIMEOUT
+        )
+    except requests.RequestException as e:
+        log.error("Ollama unreachable: %s", e)
+        return jsonify(error="Cannot reach Ollama. Is it running?"), 502
+
+    if upstream.status_code != 200:
+        try:
+            detail = upstream.json().get("error", upstream.text)
+        except ValueError:
+            detail = upstream.text
+        upstream.close()
+        return jsonify(error=f"Ollama error: {detail}"), 502
+
     def generate():
-        with requests.post(
-            OLLAMA_API_URL,
-            json={
-                "model": model,
-                "messages": messages,
-                "stream": True,
-                "keep_alive": "30m"
-            },
-            stream=True
-        ) as response:
+        try:
+            for line in upstream.iter_lines():
+                if not line:
+                    continue
+                chunk = json.loads(line.decode("utf-8"))
+                if "error" in chunk:
+                    yield f"\n\n[Error: {chunk['error']}]"
+                    return
+                yield chunk.get("message", {}).get("content", "")
+                if chunk.get("done"):
+                    return
+        except (requests.RequestException, ValueError) as e:
+            log.error("Stream interrupted: %s", e)
+            yield "\n\n[Error: response stream interrupted]"
+        finally:
+            upstream.close()
 
-            for line in response.iter_lines():
-                if line:
-                    chunk = json.loads(line.decode("utf-8"))
+    return Response(generate(), content_type="text/plain; charset=utf-8")
 
-                    if "message" in chunk:
-                        content = chunk["message"].get("content", "")
-                        yield content
-
-    return Response(generate(), content_type="text/plain")
 
 if __name__ == "__main__":
-    app.run(debug=True, threaded=True)
+    app.run(
+        host=os.environ.get("HOST", "127.0.0.1"),
+        port=int(os.environ.get("PORT", "5000")),
+        debug=os.environ.get("FLASK_DEBUG") == "1",
+        threaded=True,
+    )
